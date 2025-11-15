@@ -33,14 +33,14 @@ jobs:
         run: |
           set -euo pipefail
           KEY_PATH=/tmp/gha_deploy_key
+          # write secret to file (preserve newlines)
           printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-          # add host key (best-effort)
+          # add host key for EC2 (best-effort)
           ssh-keyscan -p "${EC2_SSH_PORT}" -H "${EC2_HOST}" >> ~/.ssh/known_hosts || true
           echo "Wrote key to $KEY_PATH and updated known_hosts"
-        # keep the private key for use by appleboy step
 
       - name: Test SSH connectivity (quick)
         env:
@@ -54,7 +54,6 @@ jobs:
             echo "SSH test OK"
           else
             echo "SSH test FAILED - check secrets and security group"
-            # produce verbose attempt to help debugging (will show in logs)
             ssh -vvv -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$KEY_PATH" -p "${EC2_SSH_PORT}" "${EC2_USER}@${EC2_HOST}" 'echo DEBUG' || true
             exit 1
           fi
@@ -70,8 +69,9 @@ jobs:
             set -euo pipefail
             APP_DIR="${{ secrets.APP_DIR || env.APP_DIR }}"
             BRANCH="${{ secrets.REPO_BRANCH || env.REPO_BRANCH }}"
-            REPO_SSH="git@github.com:${GITHUB_REPOSITORY}.git"
-            REPO_HTTPS="https://github.com/${GITHUB_REPOSITORY}.git"
+            # expand repository on the runner so the remote gets a literal string
+            REPO_SSH="git@github.com:${{ github.repository }}.git"
+            REPO_HTTPS="https://github.com/${{ github.repository }}.git"
 
             mkdir -p "$APP_DIR"
             cd "$APP_DIR" || exit 1
@@ -115,24 +115,9 @@ jobs:
             echo "Deployed — showing running services:"
             $DC ps --services --filter "status=running" || true
 
-            # optional: server-side healthcheck if HEALTHCHECK_URL env is set on server
-            if [ -n "${HEALTHCHECK_URL:-}" ]; then
-              echo "Running healthcheck: ${HEALTHCHECK_URL}"
-              TRY=0
-              until curl -sf "${HEALTHCHECK_URL}" >/dev/null 2>&1 || [ "$TRY" -ge 6 ]; do
-                TRY=$((TRY+1))
-                echo "Healthcheck try #$TRY failed; sleeping 5s"
-                sleep 5
-              done
-              if curl -sf "${HEALTHCHECK_URL}" >/dev/null 2>&1; then
-                echo "Healthcheck OK"
-              else
-                echo "Healthcheck FAILED"
-              fi
-            fi
-
       - name: Cleanup temp key on runner
         if: always()
         run: |
           rm -f /tmp/gha_deploy_key || true
           echo "Temp key removed"
+
