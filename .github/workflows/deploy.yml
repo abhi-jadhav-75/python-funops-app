@@ -1,62 +1,84 @@
-- name: Deploy to Server
-      uses: appleboy/ssh-action@v1.0.0
-      with:
-        host: ${{ secrets.HOST }}
-        username: ${{ secrets.USERNAME }}
-        key: ${{ secrets.SSH_KEY }}
-        script: |
-          set -euo pipefail
-          APP_DIR="/home/ubuntu/python-funops-app"  # ⚠️ Make sure this matches your actual server path
-          BRANCH="main"
-          
-          # Repository setup
-          REPO_SSH="git@github.com:abhi-jadhav-75/python-funops-app.git"
-          REPO_HTTPS="https://github.com/abhi-jadhav-75/python-funops-app.git"
+name: Deploy FunOps App
 
-          mkdir -p "$APP_DIR"
-          cd "$APP_DIR" || exit 1
-          chown "$(whoami):$(whoami)" "$APP_DIR" || true
+on:
+  push:
+    branches:
+      - main
 
-          if [ ! -d .git ]; then
-            echo "No .git — trying SSH clone"
-            if git clone --branch "$BRANCH" "$REPO_SSH" . 2>/tmp/git_clone_ssh.err; then
-              echo "Cloned via SSH"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          # password: ${{ secrets.PASSWORD }} # Use this if you use password instead of SSH key
+          port: 22
+          script: |
+            set -euo pipefail
+            
+            # === CONFIGURATION ===
+            # UPDATE THIS PATH to the actual folder on your server
+            APP_DIR="/home/ubuntu/python-funops-app" 
+            BRANCH="main"
+            REPO_SSH="git@github.com:abhi-jadhav-75/python-funops-app.git"
+            REPO_HTTPS="https://github.com/abhi-jadhav-75/python-funops-app.git"
+            # =====================
+
+            mkdir -p "$APP_DIR"
+            cd "$APP_DIR" || exit 1
+            
+            # Fix permissions if needed (optional, but good practice)
+            # chown "$(whoami):$(whoami)" "$APP_DIR" || true
+
+            if [ ! -d .git ]; then
+              echo "No .git — trying SSH clone"
+              if git clone --branch "$BRANCH" "$REPO_SSH" . 2>/tmp/git_clone_ssh.err; then
+                echo "Cloned via SSH"
+              else
+                echo "SSH clone failed; showing reason:"
+                sed -n '1,200p' /tmp/git_clone_ssh.err || true
+                echo "Falling back to HTTPS clone"
+                rm -rf ./* || true
+                git clone --branch "$BRANCH" "$REPO_HTTPS" .
+              fi
             else
-              echo "SSH clone failed; falling back to HTTPS"
-              rm -rf ./* || true
-              git clone --branch "$BRANCH" "$REPO_HTTPS" .
+              echo "Repository exists — fetching"
+              git fetch --all --prune || true
             fi
-          else
-            echo "Repository exists — fetching"
-            git fetch --all --prune || true
-          fi
 
-          git checkout "$BRANCH" || git checkout -b "$BRANCH"
-          git reset --hard "origin/$BRANCH" || true
-          git pull origin "$BRANCH" || true
+            git checkout "$BRANCH" || git checkout -b "$BRANCH"
+            git reset --hard "origin/$BRANCH" || true
+            git pull origin "$BRANCH" || true
 
-          if [ -f .gitmodules ]; then
-            git submodule sync --recursive
-            git submodule update --init --recursive
-          fi
+            if [ -f .gitmodules ]; then
+              git submodule sync --recursive
+              git submodule update --init --recursive
+            fi
 
-          if command -v docker-compose >/dev/null 2>&1; then
-            DC="docker-compose"
-          else
-            DC="docker compose"
-          fi
+            if command -v docker-compose >/dev/null 2>&1; then
+              DC="docker-compose"
+            else
+              DC="docker compose"
+            fi
 
-          # --- FIX: Gracefully stop old containers first ---
-          echo "Stopping old containers and removing images..."
-          $DC down --rmi all || true
-          # -------------------------------------------------
+            # --- THE FIX ---
+            echo "Stopping old containers..."
+            $DC down --rmi all || true
+            # ----------------
 
-          echo "Pulling and building new containers..."
-          $DC pull || true
-          $DC up -d --build
+            echo "Pulling and starting new containers..."
+            $DC pull || true
+            $DC up -d --build
 
-          echo "Deployed — showing running services:"
-          $DC ps --services --filter "status=running" || true
+            echo "Deployed — showing running services:"
+            $DC ps --services --filter "status=running" || true
 
-          # Prune afterwards to clean up space
-          docker image prune -af || true
+            # Cleanup old images after successful deploy
+            docker image prune -af || true
