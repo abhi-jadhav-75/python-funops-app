@@ -1,0 +1,95 @@
+name: CI/CD — Deploy to EC2 (Docker Compose)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for logs / optional)
+        uses: actions/checkout@v4
+
+      - name: Ensure known_hosts entry for server
+        # We add the host to known_hosts to avoid strict host checking issues.
+        run: |
+          mkdir -p ~/.ssh
+          # add host key to known_hosts (best-effort). If the host has dynamic IP or changes, you can disable strict checking.
+          ssh-keyscan -p "${{ secrets.EC2_SSH_PORT }}" -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts || true
+
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          port: ${{ secrets.EC2_SSH_PORT || '22' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          # strict host key checking already addressed above; if you want to force disable: set "strict" to false
+          #strict: false
+          script: |
+            set -e
+
+            APP_DIR="${{ secrets.APP_DIR }}"
+            BRANCH="${{ secrets.REPO_BRANCH || 'main' }}"
+            # make sure app dir exists
+            mkdir -p "$APP_DIR"
+            cd "$APP_DIR"
+
+            # if repo not yet cloned, clone it (change the origin URL if you want to use deploy key + repo url; this uses existing clone if present)
+            if [ ! -d ".git" ]; then
+              echo "Cloning repository into $APP_DIR"
+              git clone --branch "$BRANCH" "https://github.com/${{ github.repository }}.git" .
+            fi
+
+            # fetch latest & checkout branch
+            git fetch --all --prune
+            git checkout "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            git pull origin "$BRANCH"
+
+            # optionally pull any submodules
+            if [ -f .gitmodules ]; then
+              git submodule sync --recursive
+              git submodule update --init --recursive
+            fi
+
+            # set up environment file if needed (you could also store env in secrets and write them here)
+            # e.g. if you store env in secret named APP_ENV, you can echo it to .env (not shown)
+
+            # build and deploy with docker-compose
+            # Use 'docker compose' or 'docker-compose' depending on your server
+            if command -v docker-compose >/dev/null 2>&1; then
+              DC="docker-compose"
+            else
+              DC="docker compose"
+            fi
+
+            # optional: prune old images and containers to free space
+            docker image prune -af || true
+
+            # pull new images if you push images to registry, and build local images
+            $DC pull || true
+            $DC up -d --build
+
+            # wait a few seconds for services to come up
+            sleep 6
+
+            # optional health check (if provided)
+            if [ -n "${{ secrets.HEALTHCHECK_URL }}" ]; then
+              # try 5 times
+              TRY=0
+              until curl -sf "${{ secrets.HEALTHCHECK_URL }}" || [ $TRY -ge 5 ]; do
+                TRY=$((TRY+1))
+                echo "Healthcheck failed. Try #$TRY"
+                sleep 3
+              done
+              curl -sf "${{ secrets.HEALTHCHECK_URL }}" && echo "Healthcheck OK" || echo "Healthcheck failed after retries"
+            fi
+
+            echo "Deploy finished: $(date)"
+
