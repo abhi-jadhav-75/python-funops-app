@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FunOps — Coming Soon</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta name="description" content="FunOps — DevOps & Cloud made fun. Shorts, tips and tutorials coming soon!" />
+</head>
+<body>
+  <main class="container">
+    <header class="brand">
+      <!-- Replace with your logo image path or SVG -->
+      <div class="logo">
+         <img src="{{ url_for('static', filename='images/logo.png') }}" alt="FunOps Logo" width="64" height="64">
+     </div> 
+
+      <h1>FunOps</h1>
+    </header>
+
+    <section class="hero">
+      <h2>DevOps & Cloud — made fun 🎉</h2>
+      <p class="lead">Shorts, guides and hands-on labs for students. Launching soon.</p>
+
+      <div class="countdown" id="countdown">
+        <div><span id="days">--</span><small>days</small></div>
+        <div><span id="hours">--</span><small>hours</small></div>
+        <div><span id="mins">--</span><small>mins</small></div>
+        <div><span id="secs">--</span><small>secs</small></div>
+      </div>
+
+      <form action="{{ url_for('subscribe') }}" method="post" class="subscribe">
+        <input type="email" name="email" placeholder="Your email for launch updates" required />
+        <button type="submit">Notify Me</button>
+      </form>
+
+      {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+          <ul class="flashes">
+            {% for category, msg in messages %}
+              <li class="flash {{ category }}">{{ msg }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endwith %}
+
+      <p class="cta">Follow us on <a href="https://youtube.com" target="_blank" rel="noopener">YouTube: FunOps</a> • <a href="https://instagram.com/funops.io" target="_blank" rel="noopener">Instagram</a></p>
+    </section>
+
+    <footer class="foot">
+      © FunOps • Built with ☁️ + 🔧
+    </footer>
+  </main>
+
+  <script>
+    // Simple countdown (change launchDate to your launch date)
+    const launchDate = new Date();
+    // Example: set to 14 days from now by default
+    launchDate.setDate(launchDate.getDate() + 14);
+    // To use a fixed date: new Date("2025-12-25T00:00:00")
+    function updateCountdown() {
+      const now = new Date();
+      const diff = launchDate - now;
+      if (diff <= 0) {
+        document.getElementById("countdown").innerHTML = "<strong>We're live — check the channel!</strong>";
+        return;
+      }
+      const secs = Math.floor(diff / 1000) % 60;
+      const mins = Math.floor(diff / (1000 * 60)) % 60;
+      const hours = Math.floor(diff / (1000 * 60 * 60)) % 24;
+      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+      document.getElementById("days").textContent = days;
+      document.getElementById("hours").textContent = hours.toString().padStart(2, "0");
+      document.getElementById("mins").textContent = mins.toString().padStart(2, "0");
+      document.getElementById("secs").textContent = secs.toString().padStart(2, "0");
+    }
+    updateCountdown();
+    setInterval(updateCountdown, 1000);
+  </script>
+</body>
+</html>
+
