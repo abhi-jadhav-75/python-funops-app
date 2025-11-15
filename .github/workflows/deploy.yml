@@ -9,7 +9,6 @@ permissions:
   contents: read
 
 env:
-  # sensible defaults; override via repository secrets if you set them
   EC2_SSH_PORT: 22
   APP_DIR: /home/ubuntu/myapp
   REPO_BRANCH: main
@@ -18,159 +17,122 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for logs and context)
+      - name: Checkout (optional)
         uses: actions/checkout@v4
 
-      - name: Show trigger info
+      - name: Validate required secrets
         run: |
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Ref: $GITHUB_REF"
-          echo "Commit: $GITHUB_SHA"
+          if [ -z "${{ secrets.EC2_HOST }}" ]; then echo "Missing secret: EC2_HOST" && exit 1; fi
+          if [ -z "${{ secrets.EC2_USER }}" ]; then echo "Missing secret: EC2_USER" && exit 1; fi
+          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then echo "Missing secret: EC2_SSH_KEY" && exit 1; fi
 
-      - name: Prepare SSH key & test connection (safe)
+      - name: Write SSH private key and add known_hosts
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_USER: ${{ secrets.EC2_USER }}
           EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || env.EC2_SSH_PORT }}
         run: |
           set -euo pipefail
-
-          # ensure secrets exist
-          if [ -z "${{ secrets.EC2_HOST }}" ]; then
-            echo "ERROR: EC2_HOST secret is empty"; exit 1
-          fi
-          if [ -z "${{ secrets.EC2_USER }}" ]; then
-            echo "ERROR: EC2_USER secret is empty"; exit 1
-          fi
-          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
-            echo "ERROR: EC2_SSH_KEY secret is empty"; exit 1
-          fi
-
-          # write private key safely (preserve newlines)
-          DEP_KEY=/tmp/gha_deploy_key
-          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > "$DEP_KEY"
-          chmod 600 "$DEP_KEY"
-
-          # ensure ssh dir + known_hosts
+          KEY_PATH=/tmp/gha_deploy_key
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
-
           # add host key (best-effort)
-          echo "Adding $EC2_HOST to known_hosts"
-          ssh-keyscan -p "$EC2_SSH_PORT" -H "$EC2_HOST" >> ~/.ssh/known_hosts || true
-          echo "known_hosts entries: $(wc -l < ~/.ssh/known_hosts || true)"
+          ssh-keyscan -p "${EC2_SSH_PORT}" -H "${EC2_HOST}" >> ~/.ssh/known_hosts || true
+          echo "Wrote key to $KEY_PATH and updated known_hosts"
+        # keep the private key for use by appleboy step
 
-          # test connection with verbose output suppressed but showing final status
-          echo "Testing SSH connectivity to ${EC2_USER}@${EC2_HOST}:${EC2_SSH_PORT}..."
-          # Use BatchMode to ensure no interactive prompts; print only outcome
-          if ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$DEP_KEY" -p "$EC2_SSH_PORT" "$EC2_USER@$EC2_HOST" 'echo ACTION_RUNNER:CONNECTED'; then
-            echo "SSH test: OK"
-          else
-            echo "SSH test: FAILED - check key, EC2_HOST, EC2_USER, security groups and known_hosts"
-            # Show a short debug try with verbose output if a failure occurs (non-sensitive)
-            echo "Running a verbose connection attempt (partial output will be visible in Actions logs)..."
-            ssh -vvv -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$DEP_KEY" -p "$EC2_SSH_PORT" "$EC2_USER@$EC2_HOST" "echo DEBUG"; exit 1
-          fi
-
-      - name: Deploy application on EC2
+      - name: Test SSH connectivity (quick)
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_SSH_PORT: ${{ secrets.EC2_SSH_PORT || env.EC2_SSH_PORT }}
-          APP_DIR: ${{ secrets.APP_DIR || env.APP_DIR }}
-          BRANCH: ${{ secrets.REPO_BRANCH || env.REPO_BRANCH }}
-          HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL || '' }}
         run: |
           set -euo pipefail
+          KEY_PATH=/tmp/gha_deploy_key
+          if ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$KEY_PATH" -p "${EC2_SSH_PORT}" "${EC2_USER}@${EC2_HOST}" 'echo ACTION_RUNNER:CONNECTED'; then
+            echo "SSH test OK"
+          else
+            echo "SSH test FAILED - check secrets and security group"
+            # produce verbose attempt to help debugging (will show in logs)
+            ssh -vvv -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$KEY_PATH" -p "${EC2_SSH_PORT}" "${EC2_USER}@${EC2_HOST}" 'echo DEBUG' || true
+            exit 1
+          fi
 
-          # local key path used by previous step
-          DEP_KEY=/tmp/gha_deploy_key
-          chmod 600 "$DEP_KEY"
-
-          echo "Starting remote deploy script via SSH..."
-
-          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -i "$DEP_KEY" -p "$EC2_SSH_PORT" "$EC2_USER@$EC2_HOST" bash -s <<'REMOTE'
+      - name: Remote deploy via SSH action
+        uses: appleboy/ssh-action@v0.1.8
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          port: ${{ secrets.EC2_SSH_PORT || env.EC2_SSH_PORT }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
             set -euo pipefail
-            APP_DIR="${APP_DIR:-/home/ubuntu/myapp}"
-            BRANCH="${BRANCH:-main}"
+            APP_DIR="${{ secrets.APP_DIR || env.APP_DIR }}"
+            BRANCH="${{ secrets.REPO_BRANCH || env.REPO_BRANCH }}"
             REPO_SSH="git@github.com:${GITHUB_REPOSITORY}.git"
             REPO_HTTPS="https://github.com/${GITHUB_REPOSITORY}.git"
 
-            echo "Remote: ensure dir exists: $APP_DIR"
             mkdir -p "$APP_DIR"
+            cd "$APP_DIR" || exit 1
             chown "$(whoami):$(whoami)" "$APP_DIR" || true
-            cd "$APP_DIR"
 
-            # If not cloned, try SSH clone first (works when you've added a Deploy Key to the repo),
-            # if SSH clone fails (public repo), fallback to HTTPS clone.
             if [ ! -d .git ]; then
-              echo "No .git found — attempting SSH clone: $REPO_SSH (recommended for private repos with deploy key)"
+              echo "No .git — trying SSH clone (works with repo Deploy Key)"
               if git clone --branch "$BRANCH" "$REPO_SSH" . 2>/tmp/git_clone_ssh.err; then
                 echo "Cloned via SSH"
               else
                 echo "SSH clone failed; showing reason:"
                 sed -n '1,200p' /tmp/git_clone_ssh.err || true
-                echo "Attempting HTTPS clone (works for public repos)..."
-                rm -rf ./*
+                echo "Falling back to HTTPS clone"
+                rm -rf ./* || true
                 git clone --branch "$BRANCH" "$REPO_HTTPS" .
               fi
             else
-              echo "Repository already present, fetching latest"
-              git fetch --all --prune
+              echo "Repository exists — fetching"
+              git fetch --all --prune || true
             fi
 
-            # ensure we are on the desired branch and reset to remote
             git checkout "$BRANCH" || git checkout -b "$BRANCH"
             git reset --hard "origin/$BRANCH" || true
             git pull origin "$BRANCH" || true
 
-            # update submodules if any
             if [ -f .gitmodules ]; then
               git submodule sync --recursive
               git submodule update --init --recursive
             fi
 
-            # detect docker compose command
             if command -v docker-compose >/dev/null 2>&1; then
               DC="docker-compose"
             else
               DC="docker compose"
             fi
 
-            echo "Pruning unused images (best-effort)"
             docker image prune -af || true
-
-            echo "Pulling images (if any) and building/updating containers"
             $DC pull || true
             $DC up -d --build
 
-            echo "Containers after deploy:"
+            echo "Deployed — showing running services:"
             $DC ps --services --filter "status=running" || true
 
-            # optional healthcheck (run on server if HEALTHCHECK_URL provided)
+            # optional: server-side healthcheck if HEALTHCHECK_URL env is set on server
             if [ -n "${HEALTHCHECK_URL:-}" ]; then
-              echo "Running healthcheck against: ${HEALTHCHECK_URL}"
+              echo "Running healthcheck: ${HEALTHCHECK_URL}"
               TRY=0
-              MAX=6
-              until curl -sf "${HEALTHCHECK_URL}" >/dev/null 2>&1 || [ "$TRY" -ge "$MAX" ]; do
+              until curl -sf "${HEALTHCHECK_URL}" >/dev/null 2>&1 || [ "$TRY" -ge 6 ]; do
                 TRY=$((TRY+1))
-                echo "Healthcheck attempt #$TRY failed; waiting 5s..."
+                echo "Healthcheck try #$TRY failed; sleeping 5s"
                 sleep 5
               done
               if curl -sf "${HEALTHCHECK_URL}" >/dev/null 2>&1; then
-                echo "Healthcheck: OK"
+                echo "Healthcheck OK"
               else
-                echo "Healthcheck FAILED after ${MAX} attempts"
+                echo "Healthcheck FAILED"
               fi
             fi
 
-            echo "Remote deploy finished: $(date)"
-REMOTE
-
-      - name: Clean up temp key
+      - name: Cleanup temp key on runner
         if: always()
         run: |
-          # Remove temp key from runner
           rm -f /tmp/gha_deploy_key || true
-          echo "Temporary key removed from runner."
-
+          echo "Temp key removed"
